@@ -17,7 +17,7 @@
 
 
 
-# systemV的IPC对象
+# system-V的IPC对象
 
 ## 1.MSG（消息队列）
 
@@ -40,6 +40,15 @@
 每个信号都有一个唯一的编号和名称，
 
 信号的响应依赖于中断。
+
+![](C:\Users\foeefd\AppData\Roaming\Typora\typora-user-images\image-20250628110550824.png)
+
+* 每个线程都使用一个PCB(即`task_struct`)来表示，因此`pending`(不是指针)就是一个线程单独私有的，当使用`pthread_kill()`给指定线程发送信号时，信号就会被存储在这个链队列中
+* `signal`是一个指向线程共享的信号挂起队列相关结构体的指针，一个线程组（即一个进程）中的所有线程的`signal`指针都指向同一个结构体，当给一个进程发送某信号时，这些信号将会被存储在`shared_pending`这个线程共享的链队列中
+
+​		如果一个进程中有超过 1 条线程，那么这些共享的挂起信号将会被**随机的某条线程**响应，为了能确保让一个		指定的线程响应来自进程之外、发送给整个进程的某信号，一般的做法是：除了指定要响应某信号的线程		外，其他线程对这些信号设置阻塞。（使用`sigprocmask()`或`pthread_sigmask()`将这些需要阻塞的信号		添加到信号阻塞掩码 blocked 当中）    
+
+* `sighand` 也是一个指针，因此也是进程中的所有线程共享的，它指向跟信号响应函数相关的数据结构，结构体 `struct sighand_struct{}`中的数组 action 有 64 个元素，一一对应 Linux系统支持的 64 个信号（其中 0 号信号是测试用的，32 号和 33 号信号保留）。每一个元素是一个 `sigaction{}`结构体，其成员就是标准 C 库函数 `sigaction()`中的第二个参数的成员，可见，该函数相当于一个应用层给内核设置信号响应策略的窗口。
 
 #### 2.`signal()`
 
@@ -161,20 +170,6 @@ void(* ... )(int)
 
 ​	信号产生后，内核会为目标进程注册信号
 
-​	**核心概念**
-
-* **信号掩码（Signal Mask）**
-
-  * 每个进程拥有的一个位掩码(bitmask),指定当前被阻塞的信号集合
-
-  * **操作**：
-    * `sigprocmask()`：设置或修改进程的信号掩码
-    * `pthread_sigmask()`：线程级别的信号掩码操作
-
-* **未决信号（Pending Signals）**
-
-  * 已经发送给进程但尚未被处理的信号
-
 * 信号掩码（Signal Mask）检查
 
   *  内核首先检查目标进程的阻塞掩码（Blocked Mask），该掩码存储了被进程暂时阻塞的信号（通过`sigprocmask()`设置）
@@ -248,7 +243,7 @@ sequenceDiagram
 
 
 
-* **如何忽略掉一个信号**
+* **如何忽略掉一个信号**(`SIG_IGN`)
 
 * **标准信号为什么要丢失**
 
@@ -262,29 +257,270 @@ sequenceDiagram
 
   向指定进程或进程组发送信号
 
-  
+  需要权限：发送者的有效用户ID需匹配目标进程的真实/有效用户ID（或特权进程）。例如，普通用户无法向其他用户的进程发送信号（`ERERM`）
 
 * ##### `raise()`
 
+  允许进程向自身发送信号，`raise(signo)`等价于调用`kill(getpid(), signo)`
+
+  ```c
+  #include <signal.h>
+  int kill (pid_t pid, int signo);
+  int raise(int signo);
+  ```
+
+  * `pid`>0: 将该信号发送给进程ID为`pid`的进程
+  * `pid` == 0:将该信号发送给与发送进程属于同一进程组的所有进程（这些进程的进程组ID等于发送进程的进程组ID）
+  * `pid`=-1:发送给系统有权发送的所有进程（需要权限）
+  * `pid<-1`:发送给进程组ID为`|pid|`的所有进程
+  * `signo` 信号编号（如`SIGTERM`,`SIGKILL`,`SIGUSR1`),若为0，则不发送信号，仅检查权限
+  * 成功时返回0，失败时返回-1并设置`errno`
+
+
+
+
+
+
 * ##### `alarm()`
+
+  设置一个定时器，在指定秒数后向当前进程发送`SIGALRM`信号
+
+  * 每个进程只能有一个`alarm`定时器
+  * 定时器到期时，内核向进程发送`SIGALRM`信号（默认行为时终止进程）
+  * 可以通过`signal()`或`sigaction()`捕获信号自定义处理
+
+  ```c
+  #include <unistd.h>
+  unsigned int alarm(unsigned int seconds);
+  ```
+
+  * `seconds`定时器的时间（秒）
+    * 值为0：取消之前设置的定时器
+    * 值>0:设置新的定时器（覆盖旧定时器）
+  * 返回上一个定时器的剩余秒数（若之前没有定时器则返回0）
 
 * ##### `pause()`
 
-* ##### `absort()`
+  挂起调用进程，直到任何信号到达，即使时被忽略的信号
+
+  使程序进入可中断睡眠状态（睡眠直到捕获信号）
+
+  ```c
+  #include<unistd.h>
+  int pause(void)
+  ```
+
+  * 返回值始终使-1，且errno设为`EINTR`(表示被信号中断)
+  * 当信号处理函数返回后，`pause`才返回
+
+​	`alarm`和`pause`常结合使用实现超时等待
+
+​	
+
+​	
+
+* ##### `abort()`
+
+  立即终止程序执行，触发`SIGABRT`（可捕获但最终仍会终止）,生成核心转储(core dump), 并向操作系统返回异常退出状态
+
+  一旦调用。程序立即终止，不会返回到调用点
+
+  
+
+  ```c
+  #include <stdlib.h>
+  void abort(void);
+  ```
+
+  ```mermaid
+  graph LR
+  A[调用 abort] --> B[发送 SIGABRT 信号]
+  B --> C{是否有自定义<br>信号处理函数?}
+  C -->|有| D[执行自定义处理函数]
+  C -->|无| E[执行默认行为]
+  D --> F[是否返回?]
+  F -->|是| G[再次发送 SIGABRT]
+  F -->|否| H[终止程序]
+  E --> H[终止程序]
+  H --> I[生成 core dump]
+  I --> J[返回失败状态]
+  ```
+
+  
+
+  
 
 * ##### `system()`
 
+  在程序中执行操作系统命令（shell命令）
+
+  ```c
+  #include <stdio.h>
+  int system(const char* command);
+  ```
+
+  * `command`:要执行的命令字符串
+
+    * 如果为`NULL`，检查系统是否支持命令处理器
+    * 如果为有效命令，执行指定的命令
+
+  * | 返回值 | 含义                                        |
+    | :----- | :------------------------------------------ |
+    | 0      | 命令处理器可用（当 `command` 为 `NULL` 时） |
+    | -1     | 创建新进程失败                              |
+    | 127    | 无法执行 shell                              |
+    | 其他值 | 命令的退出状态（通常是命令返回的状态码）    |
+
+    
+
 * ##### `sleep()`
+
+  使当前线程/进程暂停执行一段指定时间（在POSIX中，使整个进程休眠）
+
+  ```c
+  #include <unistd.h>
+  unsigned int sleep(unsigned int seconds);/*seconds:休眠的秒数*/
+  ```
+
+  返回值：
+
+  *  0：成功休眠指定时间
+  * 剩余秒数：如果被信号中断，返回未休眠完的时间
+
+  
 
 #### 7.信号集
 
+`sigset_t`类型的数据结构，表示一组信号的集合
+
+```c
+typedef struct {
+    unsigned long sig[_NSIG_WORDS];
+} sigset_t;
+```
+
+* 本质是位掩码（bitmask）,每个信号对用一个位
+* 信号编号作为位索引（如SIGINT对应位2）
+
+| 函数          | 原型                                               | 功能             | 返回值                    |
+| :------------ | :------------------------------------------------- | :--------------- | :------------------------ |
+| `sigemptyset` | `int sigemptyset(sigset_t *set)`                   | 清空信号集       | 成功:0, 失败:-1           |
+| `sigfillset`  | `int sigfillset(sigset_t *set)`                    | 包含所有信号     | 同上                      |
+| `sigaddset`   | `int sigaddset(sigset_t *set, int signum)`         | 添加指定信号     | 同上                      |
+| `sigdelset`   | `int sigdelset(sigset_t *set, int signum)`         | 移除指定信号     | 同上                      |
+| `sigismember` | `int sigismember(const sigset_t *set, int signum)` | 检查信号是否存在 | 存在:1, 不存在:0, 错误:-1 |
+
 #### 8.信号屏蔽字/pending集的处理
+
+​	**核心概念**
+
+* **信号掩码（Signal Mask）**
+  * 每个进程拥有的一个位掩码(bitmask),指定当前被阻塞的信号集合
+
+  * 操作：
+    * `sigprocmask()`：设置或修改进程的信号掩码
+    * `pthread_sigmask()`：线程级别的信号掩码操作
+
+* **未决信号（Pending Signals）**
+
+  * 已经发送给进程但尚未被处理的信号
+
+**信号屏蔽（阻塞）**
+
+```c
+#include<signal.h>
+int sigprocmask(int how, const sigset_t* set, sigset_t* oldset);
+```
+
+* `how` 操作类型
+  * `SIG_BLOCK`将`set`中的信号添加到当前阻塞集
+  * `SIG_UNBLOCK`:从当前阻塞集中移除`set`中的信号
+  * `SIG_SETMASK`:将当前阻塞集替换为`set`
+* `set`：要操作的信号集
+* `oldset`保存原阻塞集
+
+**获取未决信号**
+
+```c
+#include <signal.h>
+
+int sigpending(sigset_t *set);
+```
+
+
 
 #### 9.扩展
 
 * `sigsuspend()`
+
+  **安全信号等待**， 使用场景:原子操作（避免竞态条件）
+
+  ```c
+  #include <signal.h>
+  
+  int sigsuspend(const sigset_t *mask);
+  ```
+
+  
+
 * `sigaction()`
+
+  信号处理函数注册
+
+  ```c
+  #include <signal.h>
+  
+  int sigaction(int signum, const struct sigaction *act, 
+               struct sigaction *oldact);
+  ```
+
+  `sigaction`结构
+
+  ```c
+  struct sigaction {
+      void     (*sa_handler)(int);         // 简单处理函数
+      void     (*sa_sigaction)(int, siginfo_t *, void *); // 高级处理函数
+      sigset_t sa_mask;                    // 执行处理时阻塞的信号
+      int      sa_flags;                   // 标志位
+      void     (*sa_restorer)(void);       // 已废弃
+  };
+  ```
+
+  
+
 * `setitimer()`
+
+  设置高精度间隔定时器的系统调用，相比`alarm()`提供更精细的时间控制和多种定时器类型
+
+  ```c
+  #include <sys/time.h>
+  
+  int setitimer(int which, /*定时器类型*/
+                const struct itimerval *new_value,/*新定时器设置*/
+                struct itimerval *old_value);/*原定时器设置,设为 NULL 表示不获取原设置,非 NULL 时返回当前定时器设置*/
+  ```
+
+  **三种定时模式**(`which`)
+
+  * `ITIMER_REAL`：真实时间（最常用）
+  * `ITIMER_VIRTUAL`：用户态CPU时间
+  * `ITIMER_PROF`：总CPU时间（用户+内核）
+
+  **`new_value`**
+
+  ```c
+  struct itimerval {
+      struct timeval it_interval; /* 间隔时间 */
+      struct timeval it_value;    /* 初始到期时间 */
+  };
+  
+  struct timeval {
+      time_t      tv_sec;         /* 秒 */
+      suseconds_t tv_usec;        /* 微秒 */
+  };
+  ```
+
+  成功返回0， 失败返回-1，并设置`errno`
 
 #### 10.实时信号
 
