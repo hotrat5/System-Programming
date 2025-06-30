@@ -46,7 +46,7 @@
 * 每个线程都使用一个PCB(即`task_struct`)来表示，因此`pending`(不是指针)就是一个线程单独私有的，当使用`pthread_kill()`给指定线程发送信号时，信号就会被存储在这个链队列中
 * `signal`是一个指向线程共享的信号挂起队列相关结构体的指针，一个线程组（即一个进程）中的所有线程的`signal`指针都指向同一个结构体，当给一个进程发送某信号时，这些信号将会被存储在`shared_pending`这个线程共享的链队列中
 
-​		如果一个进程中有超过 1 条线程，那么这些共享的挂起信号将会被**随机的某条线程**响应，为了能确保让一个		指定的线程响应来自进程之外、发送给整个进程的某信号，一般的做法是：除了指定要响应某信号的线程		外，其他线程对这些信号设置阻塞。（使用`sigprocmask()`或`pthread_sigmask()`将这些需要阻塞的信号		添加到信号阻塞掩码 blocked 当中）    
+​		如果一个进程中有超过 1 条线程，那么这些共享的挂起信号将会被**随机的某条线程**响应，为了能确保让一		个指定的线程响应来自进程之外、发送给整个进程的某信号，一般的做法是：除了指定要响应某信号的线		程外，其他线程对这些信号设置阻塞。（使用`sigprocmask()`或`pthread_sigmask()`将这些需要阻塞的		信号添加到信号阻塞掩码 blocked 当中）    
 
 * `sighand` 也是一个指针，因此也是进程中的所有线程共享的，它指向跟信号响应函数相关的数据结构，结构体 `struct sighand_struct{}`中的数组 action 有 64 个元素，一一对应 Linux系统支持的 64 个信号（其中 0 号信号是测试用的，32 号和 33 号信号保留）。每一个元素是一个 `sigaction{}`结构体，其成员就是标准 C 库函数 `sigaction()`中的第二个参数的成员，可见，该函数相当于一个应用层给内核设置信号响应策略的窗口。
 
@@ -666,14 +666,15 @@ int main(){
 
 
 
-## 同步互斥
+#### 3. 同步互斥
 
-### 1）互斥锁与读写锁
+#### 1）互斥锁与读写锁
 
 * 互斥是控制两个进度使之互相排斥，不同时运行
+
 * 同步是控制两个进度使之有先有后，次序可控
 
-#### 互斥锁
+  #### 互斥锁
 
 * ##### 创建, 初始化与销毁
 
@@ -721,89 +722,306 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex);
    * 被选中的线程从阻塞变为就绪
    * 当CPU调度器选择该线程时，它重新尝试获取锁
 
-#### 读写锁
+#### 	读写锁
 
 读操作可以多任务并发执行，只有写操作才能进行恰当的互斥
 
-* ##### 初始化销毁解锁
+##### 初始化销毁解锁
+
+```c
+#include <pthread.h>
+
+// 静态初始化：
+pthread_rwlock_t rw = PTHREAD_RWLOCK_INITIALIZER;
+
+// 动态初始化与销毁：
+int pthread_rwlock_init(pthread_rwlock_t *restrict rwlock,
+                        const pthread_rwlockattr_t *restrict attr);
+
+int pthread_rwlock_destroy(pthread_rwlock_t *rwlock);
+int pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
+```
+
+* 多条线程可以对同一个读写锁加多重读锁
+* 多条线程只能有一个拥有写锁
+* 读锁与写锁也是互斥的
+
+### 条件变量
+
+条件变量是一种线程同步机制，它给多个线程提供一个汇合的场所，允许线程以无竞争的方式等待某个特定条件的发生，并在条件可能满足时被唤醒，条件变量本身需要由互斥锁保护
+
+##### 初始化，销毁
+
+```c
+#include <pthread.h>
+
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+int pthread_cond_init(pthread_cond_t *restrict cond, const pthread_condattr_t *restrict attr);
+int pthread_cond_destroy(pthread_cond_t *cond);
+```
+
+##### 阻塞
+
+```c
+#include <pthread.h>
+
+//阻塞当前线程并将其放入等待队列中，然后等待条件变量cond
+int pthread_cond_wait(pthread_cond_t *restrict cond, 
+                      pthread_mutex_t *restrict mutex);
+
+/*阻塞当前线程并将其放入等待队列中，然后等待条件变量cond，
+并设置一个实现abstime,超时后不再等待并返回ETIMEOUT*/
+int pthread_cond_timedwait(pthread_cond_t *restrict cond, 
+                           pthread_mutex_t *restrict mutex, 
+                           const struct timespec *restrict abstime);
+```
+
+* `*restrict`关键字表示在该指针的生命周期内，其指向的对象不会被别的指针所引用。有利于编译优化
+
+  **`pthread_cond_wait()`的原子操作**（“释放锁+进入等待”是原子操作）
+
+  1. 释放互斥锁：**立即解锁关联的互斥锁**
+  2. 进入等待状态：线程被添加到条件变量的等待队列
+  3. 阻塞线程：线程进入阻塞状态，不消耗CPU资源
+  4. 等待信号：线程在条件变量上休眠，直到被唤醒
+
+  
+
+##### 唤醒
+
+```c
+#include <pthread.h>
+
+/*唤醒所有正在等待条件变量cond的线程*/
+int pthread_cond_broadcast(pthread_cond_t *cond);
+
+/*唤醒正在等待条件变量cond所有线程中的一个*/
+int pthread_cond_signal(pthread_cond_t *cond);
+```
+
+当其他线程调用`pthread_cond_signal(&cond)`时：
+
+1. 检查等待队列：如果有线程在等待
+2. 唤醒一个线程：选择队列中的一个线程唤醒（具体策略取决于实现）
+3. 标记为可运行：操作系统将线程状态改为就绪
+4. 线程尝试重新获取锁：当被唤醒的线程获得CPU时间后，它首先尝试重新获取关联的互斥锁
+
+### 信号量
+
+Linux中用到的信号量有 ststem-V 信号量、POSIX 有名信号量和 POSIX 无名信号，信号量本质上是一个整型变量，配合两个原子操作(P操作和V操作)。
+
+* POSIX 信号量是遵循 POSIX 标准（主要是 `POSIX.1-2001` 及以后版本）定义的信号量接口，用于在 Unix/Linux 系统中实现进程间或线程间的同步。它提供了比标准信号量概念更具体的 API 实现。
+
+  **核心特点：**
+
+  1.  **标准化：** 提供了一套统一的 API，确保在不同符合 POSIX 标准的系统（如 Linux, macOS, BSD 等）上程序的可移植性。
+  2.  **两种类型：**
+      *   **无名信号量（基于内存的信号量）：**
+          *   存在于进程的内存空间（如全局变量、堆或共享内存区）。
+          *   **线程间同步：** 默认用于同一个进程内的多个线程之间同步。
+          *   **进程间同步：** 如果将其放置在**共享内存**区域（由 `shm_open` 或 `mmap` 创建），并初始化时设置进程共享属性，则可以用于相关进程（有共享内存的父子进程或兄弟进程）间同步。它没有系统层面的持久名字。
+      *   **有名信号量：**
+          *   由内核持久化，通过一个以 `/` 开头的名字（如 `/my_semaphore`）在文件系统中标识（尽管不一定表现为可见的文件）。这个名字是全局的，可以被系统上任何知道该名字的进程访问。
+          *   **进程间同步：** 主要设计用于**无关进程**之间的同步。即使创建它的进程结束，信号量及其状态（计数值）依然由内核维护，直到被显式删除且所有引用关闭。
+  3.  **操作：** 核心操作与经典信号量模型一致：
+      *   `sem_wait(sem_t *sem)`： **P 操作 / Acquire / Wait / Down。** 尝试将信号量值减 1。如果值大于 0，则减 1 并立即返回。如果值为 0，则调用线程/进程被阻塞，直到值大于 0 且它成功减 1。
+      *   `sem_post(sem_t *sem)`： **V 操作 / Release / Signal / Up。** 将信号量值加 1。如果有线程/进程因 `sem_wait` 阻塞在该信号量上，则唤醒其中一个（唤醒策略通常是实现定义的，如 FIFO）。
+      *   `sem_trywait(sem_t *sem)`： 非阻塞版本的 `sem_wait`。如果信号量值大于 0，则减 1 并返回 0；如果值为 0，则立即返回错误（`EAGAIN`），不阻塞。
+      *   `sem_timedwait(sem_t *restrict sem, const struct timespec *restrict abs_timeout)`： 带超时的 `sem_wait`。如果信号量在指定的绝对时间 `abs_timeout` 之前无法获取，则返回超时错误（`ETIMEDOUT`）。
+  4.  **初始化与销毁：**
+      *   **无名信号量：**
+          *   初始化： `int sem_init(sem_t *sem, int pshared, unsigned int value);`
+              *   `sem`： 指向要初始化的信号量对象的指针。
+              *   `pshared`： 0 表示信号量在当前进程的线程间共享；非 0 值（通常是 1）表示信号量可以放在共享内存中用于进程间共享。
+              *   `value`： 信号量的初始计数值。
+          *   销毁： `int sem_destroy(sem_t *sem);` (销毁无名信号量，释放其资源。必须在没有线程等待它时调用)。
+      *   **有名信号量：**
+          *   创建/打开： `sem_t *sem_open(const char *name, int oflag, ... /* mode_t mode, unsigned int value */);`
+              *   `name`： 以 `/` 开头的唯一信号量名称（如 `/my_sem`）。
+              *   `oflag`： 标志位组合（`O_CREAT`, `O_EXCL`, `O_RDWR` 等）。
+              *   `mode`： (仅在 `O_CREAT` 时需指定) 权限位（类似文件权限，如 `0666`）。
+              *   `value`： (仅在 `O_CREAT` 时需指定) 信号量的初始计数值。
+              *   成功时返回指向信号量对象的指针，失败返回 `SEM_FAILED`。
+          *   关闭： `int sem_close(sem_t *sem);` (关闭当前进程打开的有名信号量引用。内核中的信号量对象及其状态依然存在)。
+          *   删除： `int sem_unlink(const char *name);` (从系统中删除有名信号量。只有当所有打开它的进程都 `sem_close` 后，内核资源才会真正释放。后续尝试 `sem_open` 这个名字会失败)。
+  5.  **获取当前值 (非标准但常用)：** POSIX 标准本身**没有**提供直接获取信号量当前值的函数。这是一个设计决策，因为获取值可能不是原子的，且可能立即过时。如果需要，可以通过其他同步机制（如互斥锁保护一个计数器）自行实现计数逻辑。某些系统（如 Linux）提供了非标准的扩展 `sem_getvalue`：
+      *   `int sem_getvalue(sem_t *sem, int *sval);`
+      *   `sval` 输出参数，存储获取的值。注意：如果信号量当前有线程阻塞在 `sem_wait` 上，某些实现可能返回负值，其绝对值表示阻塞线程的数量（但这**不是** POSIX 标准行为，可移植代码不应依赖此特性）。标准行为未定义负值含义。
+
+  **重要区别总结：无名 vs 有名**
+
+  | 特性           | 无名信号量 (`sem_init`/`sem_destroy`)  | 有名信号量 (`sem_open`/`sem_close`/`sem_unlink`) |
+  | :------------- | :------------------------------------- | :----------------------------------------------- |
+  | **存储位置**   | 用户进程内存 (全局变量、堆、共享内存)  | 内核                                             |
+  | **标识**       | 内存地址                               | 名字 (如 `/my_sem`)                              |
+  | **作用域**     | 进程内线程 或 共享内存关联的进程间     | 系统全局 (任何知道名字的进程)                    |
+  | **持久性**     | 随进程/共享内存区域的生命周期结束      | 内核维护，独立于进程生命周期 (需显式 `unlink`)   |
+  | **初始化**     | `sem_init` (指定初始值)                | `sem_open` (创建时指定初始值)                    |
+  | **清理**       | `sem_destroy` (销毁对象)               | `sem_close` (关闭引用), `sem_unlink` (删除名字)  |
+  | **创建者权限** | 创建者进程的内存访问权限               | 创建时指定 `mode` (类似文件权限)                 |
+  | **主要用途**   | 进程内线程同步；有共享内存的进程间同步 | 无关进程间同步                                   |
+
+  **使用 POSIX 信号量的基本步骤示例 (无名信号量 - 线程间)：**
 
   ```c
+  #include <semaphore.h>
   #include <pthread.h>
+  #include <stdio.h>
   
-  // 静态初始化：
-  pthread_rwlock_t rw = PTHREAD_RWLOCK_INITIALIZER;
+  sem_t my_sem; // 无名信号量变量 (通常在全局或共享结构体中)
   
-  // 动态初始化与销毁：
-  int pthread_rwlock_init(pthread_rwlock_t *restrict rwlock,
-                          const pthread_rwlockattr_t *restrict attr);
+  void* thread_func(void* arg) {
+      sem_wait(&my_sem); // P 操作 - 获取资源/进入临界区
+      // ... 访问共享资源或执行临界区代码 ...
+      sem_post(&my_sem); // V 操作 - 释放资源/离开临界区
+      return NULL;
+  }
   
-  int pthread_rwlock_destroy(pthread_rwlock_t *rwlock);
-  int pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
+  int main() {
+      // 初始化无名信号量：进程内线程共享 (pshared=0), 初始值=1 (类似互斥锁)
+      if (sem_init(&my_sem, 0, 1) != 0) {
+          perror("sem_init failed");
+          return 1;
+      }
+  
+      pthread_t thread1, thread2;
+      pthread_create(&thread1, NULL, thread_func, NULL);
+      pthread_create(&thread2, NULL, thread_func, NULL);
+  
+      pthread_join(thread1, NULL);
+      pthread_join(thread2, NULL);
+  
+      // 销毁无名信号量
+      sem_destroy(&my_sem);
+      return 0;
+  }
   ```
 
-  * 多条线程可以对同一个读写锁加多重读锁
-  * 多条线程只能有一个拥有写锁
-  * 读锁与写锁也是互斥的
+  **使用 POSIX 信号量的基本步骤示例 (有名信号量 - 进程间)：**
 
-  ### 条件变量
-
-  条件变量是一种线程同步机制，它给多个线程提供一个汇合的场所，允许线程以无竞争的方式等待某个特定条件的发生，并在条件可能满足时被唤醒，条件变量本身需要由互斥锁保护
-
-  ##### 初始化，销毁
-
+  *进程 A (创建者):*
   ```c
-  #include <pthread.h>
+  #include <fcntl.h>
+  #include <semaphore.h>
+  #include <stdio.h>
   
-  pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
-  int pthread_cond_init(pthread_cond_t *restrict cond, const pthread_condattr_t *restrict attr);
-  int pthread_cond_destroy(pthread_cond_t *cond);
+  int main() {
+      // 创建 (O_CREAT) 或打开一个有名信号量，初始值=2，权限=0666 (rw-rw-rw-)
+      sem_t *sem = sem_open("/my_named_sem", O_CREAT | O_EXCL, 0666, 2);
+      if (sem == SEM_FAILED) {
+          perror("sem_open (create) failed");
+          return 1;
+      }
+  
+      // ... 使用信号量进行工作 (sem_wait, sem_post) ...
+  
+      // 关闭当前进程对信号量的引用
+      sem_close(sem);
+  
+      // 可选：如果确定不再需要，可以立即删除（即使其他进程可能还在用）
+      // sem_unlink("/my_named_sem"); // 谨慎使用！
+      return 0;
+  }
   ```
 
-  ##### 阻塞
-
+  *进程 B (使用者):*
   ```c
-  #include <pthread.h>
+  #include <fcntl.h>
+  #include <semaphore.h>
+  #include <stdio.h>
   
-  //阻塞当前线程并将其放入等待队列中，然后等待条件变量cond
-  int pthread_cond_wait(pthread_cond_t *restrict cond, 
-                        pthread_mutex_t *restrict mutex);
+  int main() {
+      // 打开一个已存在的有名信号量 (O_RDWR 或 O_RDONLY? 通常需要 O_RDWR)
+      sem_t *sem = sem_open("/my_named_sem", O_RDWR);
+      if (sem == SEM_FAILED) {
+          perror("sem_open (open) failed");
+          return 1;
+      }
   
-  /*阻塞当前线程并将其放入等待队列中，然后等待条件变量cond，
-  并设置一个实现abstime,超时后不再等待并返回ETIMEOUT*/
-  int pthread_cond_timedwait(pthread_cond_t *restrict cond, 
-                             pthread_mutex_t *restrict mutex, 
-                             const struct timespec *restrict abstime);
+      sem_wait(sem); // P 操作
+      // ... 访问共享资源 ...
+      sem_post(sem); // V 操作
+  
+      sem_close(sem); // 关闭引用
+      return 0;
+  }
   ```
 
-  * `*restrict`关键字表示在该指针的生命周期内，其指向的对象不会被别的指针所引用。有利于编译优化
+  **注意事项 (与通用信号量相同且更强调)：**
 
-    **`pthread_cond_wait()`的原子操作**（“释放锁+进入等待”是原子操作）
+  1.  **原子性保证：** `sem_wait`, `sem_post` 等操作由系统保证其原子性。
+  2.  **死锁：** 不正确的获取/释放顺序是死锁的主要来源。仔细设计同步逻辑。
+  3.  **资源泄漏：**
+      *   **无名信号量：** 确保 `sem_destroy` 被调用（在合适时机，无等待者）。
+      *   **有名信号量：** 确保 `sem_close` 关闭引用。使用 `sem_unlink` 进行最终清理（在确定所有进程都关闭引用后）。
+  4.  **初始值：** 正确设置初始值 (`value`) 至关重要，它决定了初始可用资源的数量。
+  5.  **错误检查：** 所有 POSIX 信号量函数在失败时都会返回错误码（通常通过返回值或 `errno`）。**务必进行错误检查！**
+  6.  **有名信号量名字：** 名字必须以斜杠 (`/`) 开头，且不应包含其他斜杠（虽然某些系统允许，但为了可移植性最好避免）。名字长度有限制（`NAME_MAX`）。
+  7.  **`sem_getvalue` 的非标准性：** 避免在需要可移植的代码中依赖其行为，特别是对负值的解读。
 
-    1. 释放互斥锁：**立即解锁关联的互斥锁**
-    2. 进入等待状态：线程被添加到条件变量的等待队列
-    3. 阻塞线程：线程进入阻塞状态，不消耗CPU资源
-    4. 等待信号：线程在条件变量上休眠，直到被唤醒
-  
-    
+  **总结：**
 
-  ##### 唤醒
-
-  ```c
-  #include <pthread.h>
-  
-  /*唤醒所有正在等待条件变量cond的线程*/
-  int pthread_cond_broadcast(pthread_cond_t *cond);
-  
-  /*唤醒正在等待条件变量cond所有线程中的一个*/
-  int pthread_cond_signal(pthread_cond_t *cond);
-  ```
-  
-  当其他线程调用`pthread_cond_signal(&cond)`时：
-
-  1. 检查等待队列：如果有线程在等待
-  2. 唤醒一个线程：选择队列中的一个线程唤醒（具体策略取决于实现）
-  3. 标记为可运行：操作系统将线程状态改为就绪
-  4. 线程尝试重新获取锁：当被唤醒的线程获得CPU时间后，它首先尝试重新获取关联的互斥锁
+  POSIX 信号量是 Unix/Linux 环境下进行线程和进程同步的**标准、强大且基础**的工具。理解无名信号量（用于线程/共享内存进程）和有名信号量（用于无关进程）的区别及其各自的 API (`init`/`destroy` vs `open`/`close`/`unlink`) 是有效使用它们的关键。它们直接实现了经典的 P/V 操作语义，用于解决互斥和资源计数问题。在使用时务必注意初始化、清理、错误处理和避免死锁。
 
 
+
+
+
+### 线程池
+
+![image-20250630110802058](C:\Users\foeefd\AppData\Roaming\Typora\typora-user-images\image-20250630110802058.png)
+
+* 任务队列中刚开始没有任何任务，是一个具有头节点的空链队列
+* 使用互斥锁来保护这个队列
+* 使用条件变量来代表任务队列中的任务个数的变化，将来如果主线程向队列投放任务，可以通过条件变量来唤醒那些睡着了的线程
+* 通过一个公共开关—shutdown,来控制线程退出，进而销毁整个线程池
+
+#### 接口设计
+
+* 相关结构体 
+
+1. `struct task`
+
+   任务节点，包含需要执行的函数及其参数，通过链表连成一个任务队列
+
+   * 成员列表
+
+     ```c
+     void* (*task)(void* arg);
+     void* arg;
+     struct task* next;
+     ```
+
+   * 任务实例最终形成一条单向链表
+
+2. `thread_pool`
+
+   线程池实例，包含一个线程池的所有信息
+
+   * 成员列表
+
+     ```c
+     pthread_mutex_t lock //互斥锁，保护任务队列 
+     pthread_cond_t cond //条件变量，同步
+     bool shutdown //线程池销毁标志
+     sturct task* task_list //任务链队列指针
+     pthread_t* tids //线程ID存放位置
+     unsigned int waiting_tasks; //任务链队列中等待的任务个数
+     unsigned int active_threads; //当前活跃线程个数
+     ```
+
+   * 活跃线程个数可修改，但至少有一个活跃线程
+
+* 接口
+  * 线程池初始化 `init_pool()`
+  * 投送任务 `add_task()`
+  * 增加活跃线程 `add_thread()`
+  * 删除活跃线程`remove_thread()`
+  * 销毁线程池 `destory_pool()`
+
+
+
+## 网络通信
+
+### 基本概念
 

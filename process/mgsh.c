@@ -2,15 +2,27 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <glob.h>
 
+
+#define MAX_CMD_LEN 1024
+#define MAX_ARG 16
+#define MAX_PIPES 10
 #define DELIMS " \t\n"
+
 struct cmd_st{
     glob_t globres;
 }
 
 static void prompt(void){
-    printf("mgsh$ ");
+    printf("mgsh$ ");// 打印提示符
+    fflush(stdout);
+}
+
+static void getline(){
+    fgets()
+
 }
 
 static void parse(char* line, struct cmd_st* res){
@@ -22,7 +34,7 @@ static void parse(char* line, struct cmd_st* res){
 }
 
 int main(){
-    char* linebuf = NULL;
+    char* commands
     size_t linebuf_size = 0;
     struct cmd_st cmd;
     pid_t pid;
